@@ -11,9 +11,57 @@
     const $ = id => document.getElementById(id);
     const overlay = $('overlay');
 
-    let grid, bombs, flames, items, enemies, player, exit;
+    let grid, bombs, flames, items, enemies, player, exit, particles = [];
     let level = 1, lives = 3, score = 0, state = 'menu', stateTimer = 0;
+    let timeLeft = 0, shake = 0, hurryUp = false;
+    const STAGE_TIME = 180;
     const held = [];
+    const store = {
+        get(k, d) { try { return localStorage.getItem(k) ?? d; } catch { return d; } },
+        set(k, v) { try { localStorage.setItem(k, v); } catch { /* ignore */ } },
+    };
+    let best = +store.get('nqbomb.best', 0);
+    let muted = store.get('nqbomb.muted', '0') === '1';
+
+    // ---------- sound (synthesised, no assets) ----------
+    let actx;
+    function tone(freq, dur, type = 'square', vol = 0.15, slide = 0) {
+        if (muted) return;
+        try {
+            actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+            const o = actx.createOscillator(), g = actx.createGain(), t = actx.currentTime;
+            o.type = type; o.frequency.setValueAtTime(freq, t);
+            if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, freq + slide), t + dur);
+            g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+            o.connect(g).connect(actx.destination); o.start(t); o.stop(t + dur);
+        } catch { /* audio unavailable */ }
+    }
+    function noise(dur, vol = 0.3) {
+        if (muted) return;
+        try {
+            actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+            const len = actx.sampleRate * dur, buf = actx.createBuffer(1, len, actx.sampleRate), d = buf.getChannelData(0);
+            for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len) ** 2;
+            const s = actx.createBufferSource(), g = actx.createGain();
+            s.buffer = buf; g.gain.value = vol; s.connect(g).connect(actx.destination); s.start();
+        } catch { /* audio unavailable */ }
+    }
+    const sfx = {
+        place: () => tone(220, 0.08, 'square', 0.1),
+        boom: () => { noise(0.45, 0.35); tone(90, 0.4, 'sine', 0.3, -60); },
+        pickup: () => { tone(660, 0.08); setTimeout(() => tone(990, 0.12), 70); },
+        kill: () => tone(500, 0.2, 'sawtooth', 0.1, -400),
+        die: () => tone(400, 0.9, 'triangle', 0.2, -350),
+        clear: () => [523, 659, 784, 1046].forEach((f, i) => setTimeout(() => tone(f, 0.15, 'square', 0.12), i * 110)),
+        hurry: () => [880, 660, 880, 660].forEach((f, i) => setTimeout(() => tone(f, 0.1), i * 120)),
+    };
+
+    function burst(x, y, color, n = 8, spd = 4) {
+        for (let i = 0; i < n; i++) {
+            const a = Math.random() * Math.PI * 2, v = (0.4 + Math.random()) * spd;
+            particles.push({ x: x + 0.5, y: y + 0.5, vx: Math.cos(a) * v, vy: Math.sin(a) * v, t: 0.6 + Math.random() * 0.4, color });
+        }
+    }
 
     // ---------- helpers ----------
     const key = (x, y) => y * COLS + x;
@@ -21,8 +69,10 @@
     const bombAt = (x, y) => bombs.find(b => b.x === x && b.y === y);
     const shuffle = a => { for (let i = a.length - 1; i > 0; i--) { const j = Math.random() * (i + 1) | 0; [a[i], a[j]] = [a[j], a[i]]; } return a; };
 
-    function walkable(x, y, forEnemy) {
-        if (!inside(x, y) || grid[key(x, y)] !== EMPTY) return false;
+    function walkable(x, y, forEnemy, ghost) {
+        if (!inside(x, y)) return false;
+        const cell = grid[key(x, y)];
+        if (cell === WALL || (cell === BRICK && !ghost)) return false;
         if (bombAt(x, y)) return false;
         if (forEnemy && flames.some(f => f.x === x && f.y === y)) return false;
         return true;
@@ -52,7 +102,7 @@
     function tryMove(m, dir, forEnemy) {
         const [dx, dy] = DIRS[dir];
         m.dir = dir;
-        if (!walkable(m.tx + dx, m.ty + dy, forEnemy)) return false;
+        if (!walkable(m.tx + dx, m.ty + dy, forEnemy, m.ghost)) return false;
         m.tx += dx; m.ty += dy; m.moving = true;
         return true;
     }
@@ -87,12 +137,21 @@
         const count = Math.min(3 + level, 10);
         for (let i = 0; i < count && far.length; i++) {
             const [x, y] = far.pop();
-            const smart = Math.random() < Math.min(0.15 * (level - 1), 0.6);
-            const e = makeMover(x, y, (smart ? 2.6 : 2) + level * 0.15);
-            e.smart = smart; e.hue = smart ? 300 : 10;
-            enemies.push(e);
+            spawnEnemy(x, y, level >= 3 && Math.random() < 0.2 ? 'ghost' : null);
         }
+        particles = []; timeLeft = STAGE_TIME; hurryUp = false;
         hud();
+    }
+
+    function spawnEnemy(x, y, kind) {
+        const smart = kind === 'fast' || (!kind && Math.random() < Math.min(0.15 * (level - 1), 0.6));
+        const ghost = kind === 'ghost';
+        const speed = ghost ? 1.6 : kind === 'fast' ? 4 : (smart ? 2.6 : 2) + level * 0.15;
+        const e = makeMover(x, y, speed);
+        e.smart = smart; e.ghost = ghost;
+        e.hue = ghost ? 200 : kind === 'fast' ? 50 : smart ? 300 : 10;
+        e.points = ghost ? 300 : kind === 'fast' ? 400 : smart ? 200 : 100;
+        enemies.push(e);
     }
 
     // ---------- bombs & fire ----------
@@ -100,10 +159,13 @@
         const x = player.x, y = player.y;
         if (bombs.length >= player.maxBombs || bombAt(x, y)) return;
         bombs.push({ x, y, t: FUSE, range: player.fire });
+        sfx.place();
     }
 
     function explode(b) {
         bombs.splice(bombs.indexOf(b), 1);
+        sfx.boom(); shake = Math.min(12, shake + 6);
+        burst(b.x, b.y, '#ffd76a', 14, 5);
         addFlame(b.x, b.y);
         for (const [dx, dy] of Object.values(DIRS)) {
             for (let r = 1; r <= b.range; r++) {
@@ -111,6 +173,7 @@
                 if (grid[i] === WALL) break;
                 if (grid[i] === BRICK) {
                     grid[i] = EMPTY; score += 10;
+                    burst(x, y, '#a0522d', 10, 3);
                     if (items.has(i)) items.get(i).shown = true;
                     if (exit.i === i) exit.open = true;
                     addFlame(x, y);
@@ -147,6 +210,12 @@
     function hud() {
         $('level').textContent = level; $('lives').textContent = lives; $('score').textContent = score;
         $('bombs').textContent = player ? player.maxBombs : 1; $('fire').textContent = player ? player.fire : 2;
+        const t = Math.max(0, Math.ceil(timeLeft));
+        $('time').textContent = `${t / 60 | 0}:${String(t % 60).padStart(2, '0')}`;
+        $('time').classList.toggle('warn', t <= 30);
+        if (score > best) { best = score; store.set('nqbomb.best', best); }
+        $('best').textContent = best;
+        $('mute').textContent = muted ? '🔇' : '🔊';
     }
 
     function showOverlay(title, text, btn) {
@@ -165,10 +234,14 @@
     function die() {
         if (state !== 'play' || player.invuln > 0) return;
         state = 'dying'; stateTimer = 1.4; lives--;
+        sfx.die(); burst(player.x, player.y, '#2b7bd6', 16, 4);
         hud();
     }
 
     function update(dt) {
+        shake = Math.max(0, shake - dt * 40);
+        for (const p of particles) { p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.92; p.vy *= 0.92; p.t -= dt; }
+        particles = particles.filter(p => p.t > 0);
         if (state === 'dying') {
             stateTimer -= dt;
             if (stateTimer <= 0) {
@@ -190,6 +263,16 @@
 
         player.invuln = Math.max(0, player.invuln - dt);
 
+        // stage timer: when it runs out, fast hunters pour in from the corners
+        timeLeft -= dt;
+        if (timeLeft <= 0 && !hurryUp) {
+            hurryUp = true; sfx.hurry();
+            [[COLS - 2, ROWS - 2], [COLS - 2, 1], [1, ROWS - 2]].forEach(([x, y]) => {
+                if (grid[key(x, y)] === BRICK) grid[key(x, y)] = EMPTY;
+                spawnEnemy(x, y, 'fast');
+            });
+        }
+
         // player
         if (stepMover(player, dt)) {
             const dir = held[held.length - 1];
@@ -200,13 +283,16 @@
         const pi = key(player.x, player.y);
         const it = items.get(pi);
         if (it && it.shown) {
-            items.delete(pi); score += 50;
+            items.delete(pi); score += 50; sfx.pickup();
             if (it.type === 'bomb') player.maxBombs = Math.min(8, player.maxBombs + 1);
             if (it.type === 'fire') player.fire = Math.min(8, player.fire + 1);
             if (it.type === 'speed') player.speed = player.baseSpeed = Math.min(7, player.speed + 0.75);
             if (it.type === 'life') lives++;
         }
-        if (exit.open && pi === exit.i && enemies.length === 0) { state = 'clear'; stateTimer = 1.5; }
+        if (exit.open && pi === exit.i && enemies.length === 0) {
+            state = 'clear'; stateTimer = 1.5; sfx.clear();
+            score += Math.max(0, Math.ceil(timeLeft)) * 5; // time bonus
+        }
 
         // bombs
         for (const b of [...bombs]) { b.t -= dt; if (b.t <= 0 && bombs.includes(b)) explode(b); }
@@ -219,7 +305,10 @@
         // enemies
         for (const e of enemies) {
             if (stepMover(e, dt)) enemyThink(e);
-            if (burning.has(key(e.x, e.y))) { e.dead = true; score += e.smart ? 200 : 100; }
+            if (burning.has(key(e.x, e.y))) {
+                e.dead = true; score += e.points; sfx.kill();
+                burst(e.px, e.py, `hsl(${e.hue},70%,55%)`, 12, 4);
+            }
             else if (Math.abs(e.px - player.px) + Math.abs(e.py - player.py) < 0.7) die();
         }
         enemies = enemies.filter(e => !e.dead);
@@ -231,6 +320,8 @@
     function draw(now) {
         ctx.fillStyle = '#3b7d47'; ctx.fillRect(0, 0, canvas.width, canvas.height);
         if (!grid) return;
+        ctx.save();
+        if (shake > 0) ctx.translate((Math.random() - 0.5) * shake, (Math.random() - 0.5) * shake);
         for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
             const i = key(x, y), X = x * T, Y = y * T;
             if ((x + y) % 2 === 0 && grid[i] === EMPTY) { ctx.fillStyle = '#367341'; ctx.fillRect(X, Y, T, T); }
@@ -244,6 +335,13 @@
         for (const f of flames) drawFlame(f);
         for (const e of enemies) drawEnemy(e, now);
         drawPlayer(now);
+        for (const p of particles) {
+            ctx.globalAlpha = Math.min(1, p.t * 2); ctx.fillStyle = p.color;
+            ctx.fillRect(p.x * T - 3, p.y * T - 3, 6, 6);
+        }
+        ctx.globalAlpha = 1;
+        ctx.restore();
+        if (state === 'play' && hurryUp && Math.floor(now / 400) % 2) banner('Hurry up!');
         if (state === 'clear') banner('Stage clear!');
         if (state === 'dying' && lives > 0) banner('Ouch!');
     }
@@ -289,6 +387,7 @@
     }
     function drawEnemy(e, now) {
         const cx = e.px * T + T / 2, cy = e.py * T + T / 2 + 2 * Math.sin(now / 120 + e.x);
+        if (e.ghost) ctx.globalAlpha = 0.55 + 0.25 * Math.sin(now / 200);
         ctx.fillStyle = `hsl(${e.hue},70%,55%)`;
         ctx.beginPath(); ctx.arc(cx, cy - 4, 20, Math.PI, 0); ctx.lineTo(cx + 20, cy + 18);
         for (let i = 0; i < 4; i++) ctx.lineTo(cx + 20 - (i * 2 + 1) * 5, cy + (i % 2 ? 18 : 10));
@@ -296,6 +395,7 @@
         ctx.fillStyle = '#fff'; ctx.fillRect(cx - 11, cy - 10, 8, 10); ctx.fillRect(cx + 3, cy - 10, 8, 10);
         const [dx, dy] = DIRS[e.dir];
         ctx.fillStyle = '#000'; ctx.fillRect(cx - 9 + dx * 2, cy - 7 + dy * 2, 4, 5); ctx.fillRect(cx + 5 + dx * 2, cy - 7 + dy * 2, 4, 5);
+        ctx.globalAlpha = 1;
     }
     function drawPlayer(now) {
         if (player.invuln > 0 && Math.floor(now / 100) % 2) return;
@@ -330,6 +430,7 @@
         if (KEYMAP[e.code]) { press(KEYMAP[e.code]); e.preventDefault(); }
         else if (e.code === 'Space') { if (state === 'play') placeBomb(); e.preventDefault(); }
         else if (e.code === 'Enter' && state !== 'play') start();
+        else if (e.code === 'KeyM') toggleMute();
         else if (e.code === 'KeyP') {
             if (state === 'play') { state = 'paused'; showOverlay('Paused', 'Take a breather.', 'Resume'); }
             else if (state === 'paused') start();
@@ -337,6 +438,8 @@
     });
     addEventListener('keyup', e => { if (KEYMAP[e.code]) release(KEYMAP[e.code]); });
     addEventListener('blur', () => { held.length = 0; });
+    function toggleMute() { muted = !muted; store.set('nqbomb.muted', muted ? '1' : '0'); hud(); }
+    $('mute').addEventListener('click', toggleMute);
     $('start').addEventListener('click', start);
     overlay.addEventListener('touchend', e => { e.preventDefault(); start(); });
     document.querySelectorAll('[data-dir]').forEach(btn => {

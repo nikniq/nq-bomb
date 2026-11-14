@@ -16,6 +16,9 @@
                 <span>Score <b id="score">0</b></span>
                 <span>Bombs <b id="bombs">1</b></span>
                 <span>Fire <b id="fire">2</b></span>
+                <span>Time <b id="time">3:00</b></span>
+                <span>Best <b id="best">0</b></span>
+                <button id="mute" aria-label="Toggle sound">🔊</button>
             </div>
         </header>
         <div id="stage">
@@ -26,7 +29,7 @@
                 <button id="start">Press Enter / Tap to start</button>
             </div>
         </div>
-        <p class="help">Move: Arrow keys / WASD &nbsp;·&nbsp; Bomb: Space &nbsp;·&nbsp; Pause: P</p>
+        <p class="help">Move: Arrow keys / WASD &nbsp;·&nbsp; Bomb: Space &nbsp;·&nbsp; Pause: P &nbsp;·&nbsp; Mute: M</p>
         <div id="touch">
             <div class="pad">
                 <button data-dir="up">▲</button>
